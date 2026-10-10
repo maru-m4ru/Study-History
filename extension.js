@@ -11,13 +11,16 @@
   const DEFAULT_WIDTH = 480;
   const DEFAULT_HEIGHT = 360;
 
+  let proxyToken = '';
   let viewer = null;
   let frame = null;
   let closeButton = null;
   let currentUrl = '';
+  let currentStatus = '非表示';
   let requestedWidth = DEFAULT_WIDTH;
   let requestedHeight = DEFAULT_HEIGHT;
   let animationFrame = 0;
+  let tokenDialog = null;
 
   function getCanvas() {
     const vm = Scratch.vm;
@@ -25,11 +28,49 @@
     return canvas || document.querySelector('canvas');
   }
 
+  function handleViewerMessage(event) {
+    if (!frame || event.source !== frame.contentWindow) return;
+
+    const data = event.data;
+
+    if (
+      !data ||
+      data.source !== 'turbowarp-web-viewer' ||
+      typeof data.url !== 'string'
+    ) {
+      return;
+    }
+
+    try {
+      const target = new URL(data.url);
+
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        return;
+      }
+
+      currentUrl = target.href;
+      currentStatus = '表示中';
+    } catch {
+    }
+  }
+
+  function sendViewerCommand(action) {
+    if (!frame || !currentUrl || !viewer || viewer.style.display === 'none') {
+      return;
+    }
+
+    frame.contentWindow.postMessage({
+      source: 'turbowarp-web-viewer-control',
+      action,
+    }, '*');
+  }
+
   function createViewer() {
     if (viewer) return;
 
     viewer = document.createElement('div');
     viewer.setAttribute('aria-label', 'TurboWarp Web Viewer');
+
     Object.assign(viewer.style, {
       position: 'fixed',
       left: '0',
@@ -47,8 +88,25 @@
 
     frame = document.createElement('iframe');
     frame.title = 'Web page displayed in TurboWarp';
+
+    frame.addEventListener('load', () => {
+      if (
+        viewer &&
+        viewer.style.display !== 'none' &&
+        currentUrl &&
+        !currentUrl.startsWith('エラー:')
+      ) {
+        currentStatus = '表示中';
+      }
+    });
+
     frame.referrerPolicy = 'no-referrer';
-    frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads');
+
+    frame.setAttribute(
+      'sandbox',
+      'allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads'
+    );
+
     Object.assign(frame.style, {
       position: 'absolute',
       inset: '0',
@@ -62,6 +120,7 @@
     closeButton.type = 'button';
     closeButton.textContent = '閉じる ×';
     closeButton.title = 'Web表示を閉じる';
+
     Object.assign(closeButton.style, {
       position: 'absolute',
       top: '4px',
@@ -75,15 +134,19 @@
       font: '12px sans-serif',
       cursor: 'pointer',
     });
+
     closeButton.addEventListener('click', closeViewer);
 
     viewer.append(frame, closeButton);
     document.body.appendChild(viewer);
+
+    window.addEventListener('message', handleViewerMessage);
     window.addEventListener('resize', updateViewerPosition);
     window.addEventListener('scroll', updateViewerPosition, true);
 
     if (typeof ResizeObserver === 'function') {
       const canvas = getCanvas();
+
       if (canvas) {
         const observer = new ResizeObserver(updateViewerPosition);
         observer.observe(canvas);
@@ -96,6 +159,7 @@
     if (!viewer || viewer.style.display === 'none') return;
 
     const canvas = getCanvas();
+
     if (!canvas) {
       viewer.style.display = 'none';
       return;
@@ -130,156 +194,51 @@
       .replace(/'/g, '&#39;');
   }
 
-  function makeProxyUrl(value) {
-    if (WORKER_BASE.includes('YOUR-WORKER') || WORKER_BASE.includes('YOUR-SUBDOMAIN')) {
-      throw new Error('extension.js の WORKER_BASE をデプロイ済み Worker の URL に変更してください。');
-    }
+  function removeTokenDialog() {
+    if (!tokenDialog) return;
 
-    const workerUrl = new URL(WORKER_BASE);
-    if (workerUrl.protocol !== 'https:') {
-      throw new Error('WORKER_BASE には https:// で始まる Worker URL を指定してください。');
-    }
-
-    const target = new URL(value);
-
-    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-      throw new Error('URLには http:// または https:// を指定してください。');
-    }
-
-    if (target.username || target.password || target.port) {
-      throw new Error('ユーザー情報や標準以外のポートを含むURLには対応していません。');
-    }
-
-    const base = WORKER_BASE.replace(/\/+$/, '');
-    return `${base}/__proxy__/${target.protocol.slice(0, -1)}/${target.host}${target.pathname}${target.search}${target.hash}`;
+    tokenDialog.remove();
+    tokenDialog = null;
   }
 
-  function openWebsite(args) {
-    const value = String(args.URL || '').trim();
+  function showTokenDialog() {
+    if (tokenDialog) {
+      const existingInput = tokenDialog.querySelector('input[type="password"]');
 
-    try {
-      const target = new URL(value);
-      const proxyUrl = makeProxyUrl(target.href);
-      createViewer();
-      currentUrl = target.href;
-      viewer.style.display = 'block';
-      frame.removeAttribute('srcdoc');
-      frame.src = proxyUrl;
-      updateViewerPosition();
+      if (existingInput) existingInput.focus();
 
-      if (!animationFrame) {
-        animationFrame = window.requestAnimationFrame(trackViewerPosition);
-      }
-    } catch (error) {
-      currentUrl = `エラー: ${error.message}`;
-      createViewer();
-      viewer.style.display = 'block';
-      frame.removeAttribute('src');
-      frame.srcdoc = `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font:16px sans-serif;padding:20px;color:#222"><h2>Web表示の設定エラー</h2><p>${escapeHtml(error.message)}</p></body></html>`;
-      updateViewerPosition();
-
-      if (!animationFrame) {
-        animationFrame = window.requestAnimationFrame(trackViewerPosition);
-      }
-    }
-  }
-
-  function closeViewer() {
-    if (viewer) viewer.style.display = 'none';
-    if (frame) {
-      frame.removeAttribute('srcdoc');
-      frame.src = 'about:blank';
-    }
-    currentUrl = '';
-
-    if (animationFrame) {
-      window.cancelAnimationFrame(animationFrame);
-      animationFrame = 0;
-    }
-  }
-
-  function setViewerSize(args) {
-    const width = Number(args.WIDTH);
-    const height = Number(args.HEIGHT);
-
-    requestedWidth = Number.isFinite(width) ? Math.max(160, Math.min(1600, Math.round(width))) : DEFAULT_WIDTH;
-    requestedHeight = Number.isFinite(height) ? Math.max(120, Math.min(1200, Math.round(height))) : DEFAULT_HEIGHT;
-    updateViewerPosition();
-  }
-
-  class TurboWarpWebViewer {
-    getInfo() {
-      return {
-        id: 'turbowarpwebviewer',
-        name: 'Webサイト表示',
-        color1: '#1769aa',
-        color2: '#0d47a1',
-        blocks: [
-          {
-            opcode: 'openWebsite',
-            blockType: BlockType.COMMAND,
-            text: 'Webサイト [URL] を表示する',
-            arguments: {
-              URL: {
-                type: ArgumentType.STRING,
-                defaultValue: 'https://example.com/',
-              },
-            },
-          },
-          {
-            opcode: 'setViewerSize',
-            blockType: BlockType.COMMAND,
-            text: '表示領域を 幅 [WIDTH] 高さ [HEIGHT] にする',
-            arguments: {
-              WIDTH: {
-                type: ArgumentType.NUMBER,
-                defaultValue: DEFAULT_WIDTH,
-              },
-              HEIGHT: {
-                type: ArgumentType.NUMBER,
-                defaultValue: DEFAULT_HEIGHT,
-              },
-            },
-          },
-          {
-            opcode: 'closeViewer',
-            blockType: BlockType.COMMAND,
-            text: 'Webサイト表示を閉じる',
-          },
-          {
-            opcode: 'getCurrentUrl',
-            blockType: BlockType.REPORTER,
-            text: '表示中のWebサイトURL',
-          },
-          {
-            opcode: 'getViewerStatus',
-            blockType: BlockType.REPORTER,
-            text: 'Webサイト表示の状態',
-          },
-        ],
-      };
+      return;
     }
 
-    openWebsite(args) {
-      openWebsite(args);
-    }
+    const overlay = document.createElement('div');
+    overlay.setAttribute('role', 'presentation');
 
-    setViewerSize(args) {
-      setViewerSize(args);
-    }
+    Object.assign(overlay.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '2147483647',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: '20px',
+      background: 'rgba(0, 0, 0, 0.55)',
+      fontFamily: 'system-ui, sans-serif',
+      boxSizing: 'border-box',
+    });
 
-    closeViewer() {
-      closeViewer();
-    }
+    const panel = document.createElement('form');
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'tw-web-viewer-token-title');
 
-    getCurrentUrl() {
-      return currentUrl;
-    }
+    Object.assign(panel.style, {
+      width: 'min(440px, 100%)',
+      padding: '24px',
+      borderRadius: '12px',
+      background: '#ffffff',
+      color: '#1f2937',
+      boxShadow: '0 18px 60px rgba(0, 0, 0, 0.3)',
+      boxSizing: 'border-box',
+    });
 
-    getViewerStatus() {
-      return viewer && viewer.style.display !== 'none' ? '表示中' : '非表示';
-    }
-  }
-
-  Scratch.extensions.register(new TurboWarpWebViewer());
-})(Scratch);
+    const title = document.createElement('h
