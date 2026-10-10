@@ -1,0 +1,4 @@
+name = "turbowarp-web-proxy"
+main = "worker.js"
+compatibility_date = "2026-10-10"
+workers_dev = true
